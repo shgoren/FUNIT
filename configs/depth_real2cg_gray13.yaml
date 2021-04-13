@@ -1,0 +1,62 @@
+# Copyright (C) 2019 NVIDIA Corporation.  All rights reserved.
+# Licensed under the CC BY-NC-SA 4.0 license
+# (https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode).
+
+# logger options
+image_save_iter: 500         # How often do you want to save output images during training
+image_display_iter: 100       # How often do you want to display output images during training
+snapshot_save_iter: 1000      # How often do you want to save trained models
+log_iter: 1                   # How often do you want to log the training stats
+
+# optimization options
+max_iter: 1000000              # maximum number of training iterations
+weight_decay: 0.0001          # weight decay
+lr_gen: 0.00001                # learning rate for the generator
+lr_dis: 0.00001                 # learning rate for the discriminator
+init: kaiming                 # initialization [gaussian/kaiming/xavier/orthogonal]
+gan_w: 1                      # weight of adversarial loss for image translation
+fm_w: 1                       # weight on distance between gan features of style and translated image
+r_w: 0.1                      # weight of image reconstruction loss
+
+# model options
+gen:
+  n_channels: 1               # number of input channels
+  nf: 64                      # number of base filters in the generator
+  n_res_blks: 2            # number of residual blocks in content encoder/decoder
+  nf_mlp: 256                 # number of base filters in MLP module
+  latent_dim: 64              # dimension of the latent code for the class model
+  n_mlp_blks: 3               # number of mlp blocks
+  n_downs_content: 3          # number of downsampling layers in content encoder
+  n_downs_class: 4            # number of downsampling layers in class model encoder
+dis:
+  n_channels: 1               # number of input channels
+  nf: 64                      # base number of filters
+  n_res_blks: 8              # number of residual blocks in the discriminator
+  num_classes: 7            # number of classes in the training set
+
+# data options
+num_workers: 0
+batch_size: 12
+new_size: 224                 # first resize the shortest image side to this size
+crop_size: 128               # random crop image of this height
+data_folder_train: ./datasets/apple
+data_list_train: ./datasets/6_train_fake_2_test_real_comp_train.txt
+data_folder_test: ./datasets/apple
+data_list_test: ./datasets/6_train_fake_2_test_real_comp_test.txt
+k_class_images: 1
+paired: True
+crop: True
+
+#### old notes
+# changed d_lr from 0.0001 to 0.00001
+# changed g_lr from 0.0001 to 0.00001
+
+### new notes
+# paired
+# 6 fake classes for training 2 classes never seen for testing - real and composite
+# 64 by 64 patch after 24 by 24 failed
+# dis: 8 res blocks
+# lr gen 00001 dis 000001
+
+## results
+

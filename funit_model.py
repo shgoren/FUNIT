@@ -21,36 +21,32 @@ class FUNITModel(nn.Module):
         self.gen = FewShotGen(hp['gen'], hp['k_class_images'])
         self.dis = GPPatchMcResDis(hp['dis'])
         self.gen_test = copy.deepcopy(self.gen)
-        self.k = hp.get('k_class_images', 1)
-        self.skip_real = hp.get('dis_skip_real', 1)
+        self.k = hp['k_class_images']
 
     def forward(self, co_data, cl_data, hp, mode, paired_data=None):
         xa = co_data[0].cuda()
         la = co_data[1].cuda()
         xb = cl_data[0].cuda()
         lb = cl_data[1].cuda()
-        k = xb.size(1)  # this is not exactly the k specified in config because of patches
         if mode == 'gen_update':
             c_xa = self.gen.enc_content(xa)
-            # TODO: reconstruction should use patches too if patches is enabled
-            s_xa = self.gen.enc_class_model(xa)  # reconstruction style
-            s_xb = self.gen.enc_class_model(xb)  # style
+            s_xa = self.gen.enc_class_model(xa, k=1) # reconstruction style
+            s_xb = self.gen.enc_class_model(xb, k=self.k) # style
             xt = self.gen.decode(c_xa, s_xb)  # translation
             xr = self.gen.decode(c_xa, s_xa)  # reconstruction
-            l_adv_t, gacc_t, xt_gan_feat = self.dis.calc_gen_loss(xt, lb[:, 0])
+            l_adv_t, gacc_t, xt_gan_feat = self.dis.calc_gen_loss(xt, lb)
             l_adv_r, gacc_r, xr_gan_feat = self.dis.calc_gen_loss(xr, la)
-            _, xb_gan_feat = self.dis(xb[:, 0], lb[:, 0])
+            _, xb_gan_feat = self.dis(xb[::self.k], lb)
             _, xa_gan_feat = self.dis(xa, la)
-            # comparing the discriminator feature map statistics
             l_c_rec = recon_criterion(xr_gan_feat.mean(3).mean(2),
                                       xa_gan_feat.mean(3).mean(2))
             l_m_rec = recon_criterion(xt_gan_feat.mean(3).mean(2),
                                       xb_gan_feat.mean(3).mean(2))
-            if torch.all(paired_data[0] == paired_data[0]):
+            if paired_data is not None:
                 xp = paired_data[0].cuda()
                 pair_loss = recon_criterion(xt, xp)
             else:
-                pair_loss = torch.tensor(0.)
+                pair_loss = torch.tensor(0)
             l_x_rec = recon_criterion(xr, xa)
             l_adv = 0.5 * (l_adv_t + l_adv_r)
             acc = 0.5 * (gacc_t + gacc_r)
@@ -63,8 +59,7 @@ class FUNITModel(nn.Module):
         elif mode == 'dis_update':
             xb.requires_grad_()
             # TODO:  if dis is too strong use only `b` real images (now using `b*k`)
-            l_real_pre, acc_r, resp_r = self.dis.calc_dis_real_loss(xb.view(-1, *xb.shape[2:])[::self.skip_real],
-                                                                    lb.reshape(-1)[::self.skip_real])
+            l_real_pre, acc_r, resp_r = self.dis.calc_dis_real_loss(xb[::hp['k_class_images']], lb)
             l_real = hp['gan_w'] * l_real_pre
             l_real.backward(retain_graph=True)
             l_reg_pre = self.dis.calc_grad2(resp_r, xb)
@@ -72,9 +67,10 @@ class FUNITModel(nn.Module):
             l_reg.backward()
             with torch.no_grad():
                 c_xa = self.gen.enc_content(xa)
-                s_xb = self.gen.enc_class_model(xb)
+                s_xb = self.gen.enc_class_model(xb, self.k)
                 xt = self.gen.decode(c_xa, s_xb)
-            l_fake_p, acc_f, resp_f = self.dis.calc_dis_fake_loss(xt.detach(), lb[:, 0])
+            l_fake_p, acc_f, resp_f = self.dis.calc_dis_fake_loss(xt.detach(),
+                                                                  lb)
             l_fake = hp['gan_w'] * l_fake_p
             l_fake.backward()
             l_total = l_fake + l_real + l_reg
@@ -90,14 +86,13 @@ class FUNITModel(nn.Module):
         xa = co_data[0].cuda()
         xb = cl_data[0].cuda()
         c_xa_current = self.gen.enc_content(xa)
-        # TODO: use all patches for reconstruction
-        s_xa_current = self.gen.enc_class_model(xa)
-        s_xb_current = self.gen.enc_class_model(xb)
+        s_xa_current = self.gen.enc_class_model(xa, k=1)
+        s_xb_current = self.gen.enc_class_model(xb, k=self.k)
         xt_current = self.gen.decode(c_xa_current, s_xb_current)
         xr_current = self.gen.decode(c_xa_current, s_xa_current)
         c_xa = self.gen_test.enc_content(xa)
-        s_xa = self.gen_test.enc_class_model(xa)
-        s_xb = self.gen_test.enc_class_model(xb)
+        s_xa = self.gen_test.enc_class_model(xa, k=1)
+        s_xb = self.gen_test.enc_class_model(xb, self.k)
         xt = self.gen_test.decode(c_xa, s_xb)
         xr = self.gen_test.decode(c_xa, s_xa)
         self.train()

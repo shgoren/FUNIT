@@ -15,11 +15,10 @@ import math
 from torchvision.transforms import transforms
 import cv2
 import numpy as np
-
 irange = range
 import torch.nn.functional as F
 
-from data import ContentStyleDataset, depth_im_loader
+from data import ImageLabelFilelist, depth_im_loader
 
 
 def update_average(model_tgt, model_src, beta=0.999):
@@ -31,45 +30,26 @@ def update_average(model_tgt, model_src, beta=0.999):
             p_tgt.copy_(beta * p_tgt + (1. - beta) * p_src)
 
 
-def make_transform_list(new_size, hflip,
-        # crop, center_crop, crop_size
-                        ):
-    transform_list = [transforms.ToTensor(),
-                      transforms.Normalize((0.5,), (0.5,))
-                      ]
-    # if center_crop:
-    #     transform_list = [transforms.CenterCrop(crop_size)] + \
-    #                      transform_list if crop else transform_list
-    # else:
-    #     transform_list = [transforms.RandomCrop(crop_size)] + \
-    #                      transform_list if crop and not paired else transform_list
-    transform_list = [transforms.Resize((new_size, new_size))] + transform_list \
-        if new_size is not None else transform_list
-    # if not center_crop and hflip:
-    if hflip:
-        transform_list = [transforms.RandomHorizontalFlip()] + transform_list
-    return transform_list
-
-
 def loader_from_list(
         root,
         file_list,
         batch_size,
         new_size=None,
-        patch_size=128,
+        crop_size=128,
+        crop=True,
         num_workers=4,
+        shuffle=True,
+        center_crop=False,
         return_paths=False,
-        k=1,
-        paired=False,
-        hflip=True,
-        style_all_patches=True):
+        drop_last=True,
+        k=1, paired=False, hflip=True, source=False):
     """
 
     :param root:
     :param file_list:
     :param batch_size:
     :param new_size:
-    :param patch_size:
+    :param crop_size:
     :param crop:
     :param num_workers:
     :param shuffle:
@@ -82,102 +62,153 @@ def loader_from_list(
     :param source: use only with paired, indicates which part of the pair to return
     :return:
     """
-    transform_list = make_transform_list(new_size, hflip)
+    assert not (k > 1 and paired), "can't use paired training with k>1"
+    transform_list = [transforms.ToTensor(),
+                      transforms.Normalize((0.5,), (0.5,))
+                      # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+                      ]
+    if center_crop:
+        transform_list = [transforms.CenterCrop(crop_size)] + \
+                         transform_list if crop else transform_list
+    else:
+        transform_list = [transforms.RandomCrop(crop_size)] + \
+                         transform_list if crop and not paired else transform_list
+    transform_list = [transforms.Resize((new_size, new_size))] + transform_list \
+        if new_size is not None else transform_list
+    if not center_crop and hflip:
+        transform_list = [transforms.RandomHorizontalFlip()] + transform_list
     transform = transforms.Compose(transform_list)
-    dataset = ContentStyleDataset(root,
-                                  file_list,
-                                  transform,
-                                  im_loader=depth_im_loader,
-                                  return_path=return_paths,
-                                  patch_size=patch_size,
-                                  syle_all_patches=style_all_patches,
-                                  paired=paired,
-                                  k=k)
+    dataset = ImageLabelFilelist(root,
+                                 file_list,
+                                 transform,
+                                 loader=depth_im_loader,
+                                 return_paths=return_paths, crop=crop,
+                                 paired=paired, source=source, imsize=new_size, crop_size=crop_size)
     loader = DataLoader(dataset,
                         num_workers=num_workers,
-                        batch_sampler=BatchContentStyleSampler(dataset, batch_size))
+                        batch_sampler=BatchSamplerKImages(dataset, batch_size, k))
     return loader
 
 
-class BatchContentStyleSampler:
+class BatchSamplerKImages:
 
-    def __init__(self, dataset, batch):
+    def __init__(self, dataset, batch, k):
+        self.dataset = dataset
         self.batch_size = batch
-        self.cont_sampler = RandomSampler(dataset)
-        self.style_sampler = RandomSampler(dataset)
+        self.k = k
+        self.class2img_idx = dataset.class2img_idx
+        self.sampler = RandomSampler(dataset)
 
     def __iter__(self):
         batch = []
-        for cont_idx, style_idx in zip(self.cont_sampler, self.style_sampler):
-            batch.append((cont_idx, style_idx))
-            if len(batch) == self.batch_size:
+        for idx in self.sampler:
+            batch.append(idx)
+            _, label = self.dataset.imgs[idx]
+            for _ in range(self.k-1):
+                idx = np.random.choice(self.class2img_idx[label])
+                batch.append(idx)
+            if len(batch) == self.batch_size * self.k:
                 yield batch
                 batch = []
         if len(batch) > 0:
             yield batch
 
 
+
+
 def get_evaluation_loaders(conf, shuffle_content=False):
     batch_size = conf['batch_size']
     num_workers = conf['num_workers']
     new_size = conf['new_size']
-    patch_size = conf['crop_size']
-    k = conf.get('k_class_images', 1)
-    style_all_patches = conf.get("style_all_patches", True)
-
-    test_loader = loader_from_list(
-        root=conf['data_folder_test'],
-        file_list=conf['data_list_test'],
+    crop_size = conf['crop_size']
+    content_loader = loader_from_list(
+        root=conf['data_folder_train'],
+        file_list=conf['data_list_train'],
         batch_size=batch_size,
         new_size=new_size,
-        patch_size=patch_size,
-        return_paths=True,
+        crop_size=crop_size,
+        crop=True,
         num_workers=num_workers,
-        k=k,
-        paired=False,
-        hflip=False,
-        style_all_patches=style_all_patches)
+        shuffle=shuffle_content,
+        center_crop=False,
+        return_paths=True,
+        drop_last=False, paired=False, source=True)
 
-    return test_loader
-
+    class_loader = loader_from_list(
+        root=conf['data_folder_test'],
+        file_list=conf['data_list_test'],
+        batch_size=batch_size * conf['k_shot'],
+        new_size=new_size,
+        crop_size=crop_size,
+        crop=True,
+        num_workers=1,
+        shuffle=False,
+        center_crop=False,
+        return_paths=True,
+        drop_last=False, paired=False, source=False)
+    return content_loader, class_loader
 
 def get_train_loaders(conf):
     batch_size = conf['batch_size']
     num_workers = conf['num_workers']
     new_size = conf['new_size']
-    patch_size = conf['crop_size']
-    if patch_size == new_size:
-        patch_size = None
-    k = conf.get('k_class_images', 1)
-    style_all_patches = conf.get("style_all_patches", True)
-
-    train_loader = loader_from_list(
+    crop_size = conf['crop_size']
+    train_content_loader = loader_from_list(
         root=conf['data_folder_train'],
         file_list=conf['data_list_train'],
         batch_size=batch_size,
         new_size=new_size,
-        patch_size=patch_size,
+        crop_size=crop_size,
+        crop=conf.get('crop', False),
+        return_paths=True,
+        num_workers=num_workers, paired=conf['paired'], hflip=False, source=True)
+    train_class_loader = loader_from_list(
+        root=conf['data_folder_train'],
+        file_list=conf['data_list_train'],
+        batch_size=batch_size,
+        new_size=new_size,
+        crop_size=crop_size,
+        crop=conf.get('crop', False),
         return_paths=True,
         num_workers=num_workers,
-        k=k,
-        paired=conf['paired'],
-        hflip=False,
-        style_all_patches=style_all_patches)
+        k=conf['k_class_images'], paired=False, hflip=False)
+    if conf['paired']:
+        paired_content_loader = loader_from_list(
+            root=conf['data_folder_train'],
+            file_list=conf['data_list_train'],
+            batch_size=batch_size,
+            new_size=new_size,
+            crop_size=crop_size,
+            crop=conf.get('crop', False),
+            return_paths=True,
+            num_workers=num_workers, paired=True, hflip=False, source=False)
+    else:
+        paired_content_loader = [None] * len(train_content_loader.dataset)
 
-    test_loader = loader_from_list(
+
+
+    test_content_loader = loader_from_list(
         root=conf['data_folder_test'],
         file_list=conf['data_list_test'],
         batch_size=batch_size,
         new_size=new_size,
-        patch_size=patch_size,
+        crop_size=crop_size,
+        crop=False,
         return_paths=True,
-        num_workers=num_workers,
-        k=k,
-        paired=False,
-        hflip=False,
-        style_all_patches=style_all_patches)
+        num_workers=0, paired=False, hflip=False, source=True)
+    test_class_loader = loader_from_list(
+        root=conf['data_folder_test'],
+        file_list=conf['data_list_test'],
+        batch_size=batch_size,
+        new_size=new_size,
+        crop_size=crop_size,
+        crop=False,
+        return_paths=True,
+        num_workers=0,
+        k=conf['k_class_images'], paired=False, hflip=False, source=False)
 
-    return train_loader, test_loader
+    return (train_content_loader, train_class_loader, paired_content_loader,
+            test_content_loader, test_class_loader)
 
 
 def get_config(config):
@@ -197,16 +228,14 @@ def make_result_folders(output_directory):
     return checkpoint_directory, image_directory
 
 
+
 def __write_images(im_outs, dis_img_n, file_name):
     # im_outs = [images.expand(-1, 3, -1, -1) for images in im_outs]
-    paired = len(im_outs) == 5
     im_outs = [images.expand(-1, 1, -1, -1) for images in im_outs]
     image_tensor = torch.cat([F.interpolate(images[:dis_img_n], size=224) for images in im_outs], 0)
-    if not paired:
-        desc = ["content", "style", "trans", "recon"]
-    else:
-        desc = ["content", "style", "trans", "pair", "recon"]
-    image_grid = make_grid_with_labels(image_tensor.data, desc,
+    image_grid = make_grid_with_labels(image_tensor.data,
+                                       ["content", "current reconstruction", "current translation", "class",
+                                        "aggregate reconstruction", "aggregate translation"],
                                        nrow=dis_img_n, padding=0, normalize=True)
     vutils.save_image(image_grid, file_name, nrow=1)
 
@@ -312,7 +341,7 @@ def make_grid_with_labels(tensor, labels, nrow=8, limit=1000, padding=2,
                     np.asarray(np.transpose(working_tensor.cpu().numpy(), (1, 2, 0)) * 255).astype('uint8'))
                 if x == 0:
                     working_image = cv2.putText(working_image, f'{str(labels[y])}', org, font,
-                                                fontScale, color, thickness, cv2.LINE_AA)
+                                        fontScale, color, thickness, cv2.LINE_AA)
                 working_tensor = transforms.ToTensor()(working_image.get())
 
             grid.narrow(1, y * height + padding, height - padding) \
@@ -381,13 +410,3 @@ class Timer:
 
     def __exit__(self, exc_type, exc_value, exc_tb):
         print(self.msg % (time.time() - self.start_time))
-
-def test_loader_from_list():
-    loader = loader_from_list("./datasets/apple",
-                              "./datasets/6_train_fake+noises_2_test_real_comp__v2_train.txt",
-                              4, num_workers=0)
-    for c, s, r in loader:
-        print(c)
-        print(s)
-        print(r)
-        break

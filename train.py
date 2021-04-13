@@ -70,7 +70,12 @@ elif isinstance(opts.gpu, list) and opts.gpu:
 else:
     raise ValueError("specific gpu not selected")
 
-train_loader, test_loader = get_train_loaders(config)
+loaders = get_train_loaders(config)
+train_content_loader = loaders[0]
+train_class_loader = loaders[1]
+pair_content_loader = loaders[2]
+test_content_loader = loaders[3]
+test_class_loader = loaders[4]
 
 # Setup logger and output folders
 model_name = os.path.splitext(os.path.basename(opts.config))[0]
@@ -87,12 +92,13 @@ iterations = trainer.resume(checkpoint_directory,
 # warnings.simplefilter('error')
 
 while True:
-    for it, (cont_data, style_data, pair_data) in enumerate(train_loader):
+    for it, (co_data, cl_data) in enumerate(
+            zip(train_content_loader, train_class_loader)):
         # returned data dimensions is (b*k, c, h, w)
+        cl_data[1] = cl_data[1][::config['k_class_images']]
         with Timer("Elapsed time in update: %f"):
-            if it % config.get('dis_skip', 1) == 0:
-                d_acc = trainer.dis_update(cont_data, style_data, config)
-            g_acc = trainer.gen_update(cont_data, style_data, pair_data, config,
+            d_acc = trainer.dis_update(co_data, cl_data, config)
+            g_acc = trainer.gen_update(co_data, cl_data, config,
                                        opts.multigpus)
             torch.cuda.synchronize()
             print('D acc: %.4f\t G acc: %.4f' % (d_acc, g_acc))
@@ -110,28 +116,32 @@ while True:
             else:
                 key_str = 'current'
             with torch.no_grad():
-                for t, (val_cont_data, val_style_data, pair_data) in enumerate(train_loader):
+                for t, (val_co_data, val_cl_data) in enumerate(
+                        zip(train_content_loader, train_class_loader)):
+                    val_cl_data[1] = val_cl_data[1][::config['k_class_images']]
+                    has_pair = ['real' not in p for p in val_cl_data[2]]
                     if t >= opts.test_batch_size:
                         break
-                    cont, recon_curr, trans_curr, style, recon, trans = trainer.test(val_cont_data, val_style_data,
-                                                                                     opts.multigpus)
-                    if torch.all(pair_data[0] == pair_data[0]):
-                        xp = pair_data[0].cuda()
-                        val_image_outputs = (cont, style[:, 0], trans, xp, recon)
-                    else:
-                        val_image_outputs = (cont, style[:, 0], trans, recon)
+                    val_image_outputs = trainer.test(val_co_data, val_cl_data,
+                                                     opts.multigpus)
+                    val_cl_data[0] = val_cl_data[0][::config["k_class_images"]]
                     write_1images(val_image_outputs, image_directory,
                                   'train_%s_%02d' % (key_str, t))
-
-                for t, (test_co_data, test_cl_data, _) in enumerate(test_loader):
+                for t, (test_co_data, test_cl_data) in enumerate(
+                        zip(test_content_loader, test_class_loader)):
+                    test_cl_data[1] = test_cl_data[1][::config['k_class_images']]
                     if t >= opts.test_batch_size:
                         break
-                    cont, recon_curr, trans_curr, style, recon, trans = trainer.test(test_co_data,
-                                                                                     test_cl_data,
-                                                                                     opts.multigpus)
-                    test_image_outputs = (cont, style[:, 0], trans, recon)
+                    test_image_outputs = trainer.test(test_co_data,
+                                                      test_cl_data,
+                                                      opts.multigpus)
+                    test_cl_data[0] = test_cl_data[0][::config["k_class_images"]]
                     write_1images(test_image_outputs, image_directory,
                                   'test_%s_%02d' % (key_str, t))
+                # reshuffle test data
+                shuffle_seed = random.randint(0, 10000000)
+                test_content_loader.dataset.set_new_order(shuffle_seed)
+                test_class_loader.dataset.set_new_order(shuffle_seed)
         if (iterations + 1) % config['snapshot_save_iter'] == 0:
             trainer.save(checkpoint_directory, iterations, opts.multigpus)
             print('Saved model at iteration %d' % (iterations + 1))
@@ -140,4 +150,8 @@ while True:
         if iterations >= max_iter:
             print("Finish Training")
             sys.exit(0)
+    # reshuffle train data
+    shuffle_seed = random.randint(0, 10000000)
+    train_content_loader.dataset.set_new_order(shuffle_seed)
+    train_class_loader.dataset.set_new_order(shuffle_seed)
 
