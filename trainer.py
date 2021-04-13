@@ -13,6 +13,8 @@ import torch.nn.init as init
 from torch.optim import lr_scheduler
 
 from funit_model import FUNITModel
+import warnings
+warnings.filterwarnings("error")
 
 
 def update_average(model_tgt, model_src, beta=0.999):
@@ -34,23 +36,24 @@ class Trainer(nn.Module):
         gen_params = list(self.model.gen.parameters())
         self.dis_opt = torch.optim.RMSprop(
             [p for p in dis_params if p.requires_grad],
-            lr=lr_gen, weight_decay=cfg['weight_decay'])
+            lr=lr_dis, weight_decay=cfg['weight_decay'])
         self.gen_opt = torch.optim.RMSprop(
             [p for p in gen_params if p.requires_grad],
-            lr=lr_dis, weight_decay=cfg['weight_decay'])
+            lr=lr_gen, weight_decay=cfg['weight_decay'])
         self.dis_scheduler = get_scheduler(self.dis_opt, cfg)
         self.gen_scheduler = get_scheduler(self.gen_opt, cfg)
         self.apply(weights_init(cfg['init']))
         self.model.gen_test = copy.deepcopy(self.model.gen)
 
-    def gen_update(self, co_data, cl_data, hp, multigpus):
+    def gen_update(self, co_data, cl_data, pair_data, hp, multigpus):
         self.gen_opt.zero_grad()
-        al, ad, xr, cr, sr, ac = self.model(co_data, cl_data, hp, 'gen_update')
+        al, ad, xr, xpaired, cr, sr, ac = self.model(co_data, cl_data, hp, 'gen_update', paired_data=pair_data)
         self.loss_gen_total = torch.mean(al)
         self.loss_gen_recon_x = torch.mean(xr)
         self.loss_gen_recon_c = torch.mean(cr)
         self.loss_gen_recon_s = torch.mean(sr)
         self.loss_gen_adv = torch.mean(ad)
+        self.loss_gen_paired = torch.mean(xpaired)
         self.accuracy_gen_adv = torch.mean(ac)
         self.gen_opt.step()
         this_model = self.model.module if multigpus else self.model

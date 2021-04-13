@@ -17,11 +17,11 @@ def assign_adain_params(adain_params, model):
     for m in model.modules():
         if m.__class__.__name__ == "AdaptiveInstanceNorm2d":
             mean = adain_params[:, :m.num_features]
-            std = adain_params[:, m.num_features:2*m.num_features]
+            std = adain_params[:, m.num_features:2 * m.num_features]
             m.bias = mean.contiguous().view(-1)
             m.weight = std.contiguous().view(-1)
-            if adain_params.size(1) > 2*m.num_features:
-                adain_params = adain_params[:, 2*m.num_features:]
+            if adain_params.size(1) >= 2 * m.num_features:
+                adain_params = adain_params[:, 2 * m.num_features:]
 
 
 def get_num_adain_params(model):
@@ -29,7 +29,7 @@ def get_num_adain_params(model):
     num_adain_params = 0
     for m in model.modules():
         if m.__class__.__name__ == "AdaptiveInstanceNorm2d":
-            num_adain_params += 2*m.num_features
+            num_adain_params += 2 * m.num_features
     return num_adain_params
 
 
@@ -39,7 +39,8 @@ class GPPatchMcResDis(nn.Module):
         assert hp['n_res_blks'] % 2 == 0, 'n_res_blk must be multiples of 2'
         self.n_layers = hp['n_res_blks'] // 2
         nf = hp['nf']
-        cnn_f = [Conv2dBlock(3, nf, 7, 1, 3,
+        n_channels = hp['n_channels']
+        cnn_f = [Conv2dBlock(n_channels, nf, 7, 1, 3,
                              pad_type='reflect',
                              norm='none',
                              activation='none')]
@@ -61,7 +62,7 @@ class GPPatchMcResDis(nn.Module):
         self.cnn_c = nn.Sequential(*cnn_c)
 
     def forward(self, x, y):
-        assert(x.size(0) == y.size(0))
+        assert (x.size(0) == y.size(0))
         feat = self.cnn_f(x)
         out = self.cnn_c(feat)
         index = torch.LongTensor(range(out.size(0))).cuda()
@@ -72,7 +73,7 @@ class GPPatchMcResDis(nn.Module):
         resp_fake, gan_feat = self.forward(input_fake, input_label)
         total_count = torch.tensor(np.prod(resp_fake.size()),
                                    dtype=torch.float).cuda()
-        fake_loss = torch.nn.ReLU()(1.0 + resp_fake).mean()
+        fake_loss = torch.nn.ReLU(inplace=False)(1.0 + resp_fake).mean()
         correct_count = (resp_fake < 0).sum()
         fake_accuracy = correct_count.type_as(fake_loss) / total_count
         return fake_loss, fake_accuracy, resp_fake
@@ -81,7 +82,7 @@ class GPPatchMcResDis(nn.Module):
         resp_real, gan_feat = self.forward(input_real, input_label)
         total_count = torch.tensor(np.prod(resp_real.size()),
                                    dtype=torch.float).cuda()
-        real_loss = torch.nn.ReLU()(1.0 - resp_real).mean()
+        real_loss = torch.nn.ReLU(inplace=False)(1.0 - resp_real).mean()
         correct_count = (resp_real >= 0).sum()
         real_accuracy = correct_count.type_as(real_loss) / total_count
         return real_loss, real_accuracy, resp_real
@@ -104,12 +105,12 @@ class GPPatchMcResDis(nn.Module):
                                   only_inputs=True)[0]
         grad_dout2 = grad_dout.pow(2)
         assert (grad_dout2.size() == x_in.size())
-        reg = grad_dout2.sum()/batch_size
+        reg = grad_dout2.sum() / batch_size
         return reg
 
 
 class FewShotGen(nn.Module):
-    def __init__(self, hp):
+    def __init__(self, hp, k):
         super(FewShotGen, self).__init__()
         nf = hp['nf']
         nf_mlp = hp['nf_mlp']
@@ -118,8 +119,10 @@ class FewShotGen(nn.Module):
         n_mlp_blks = hp['n_mlp_blks']
         n_res_blks = hp['n_res_blks']
         latent_dim = hp['latent_dim']
+        n_channels = hp['n_channels']
+        self.k = k
         self.enc_class_model = ClassModelEncoder(down_class,
-                                                 3,
+                                                 n_channels,
                                                  nf,
                                                  latent_dim,
                                                  norm='none',
@@ -128,7 +131,7 @@ class FewShotGen(nn.Module):
 
         self.enc_content = ContentEncoder(down_content,
                                           n_res_blks,
-                                          3,
+                                          n_channels,
                                           nf,
                                           'in',
                                           activ='relu',
@@ -137,7 +140,7 @@ class FewShotGen(nn.Module):
         self.dec = Decoder(down_content,
                            n_res_blks,
                            self.enc_content.output_dim,
-                           3,
+                           n_channels,
                            res_norm='adain',
                            activ='relu',
                            pad_type='reflect')
@@ -160,7 +163,7 @@ class FewShotGen(nn.Module):
         # extract content code from the input image
         content = self.enc_content(one_image)
         # extract model code from the images in the model set
-        class_codes = self.enc_class_model(model_set)
+        class_codes = self.enc_class_model(model_set, k=self.k)
         class_code = torch.mean(class_codes, dim=0).unsqueeze(0)
         return content, class_code
 
@@ -197,7 +200,15 @@ class ClassModelEncoder(nn.Module):
         self.output_dim = dim
 
     def forward(self, x):
-        return self.model(x)
+        if len(x.shape) == 5:
+            k = x.size(1)
+            x = x.view(-1, *x.shape[2:])
+        else:
+            k = 1
+        out = self.model(x)
+        out = out.view(-1, k, *out.shape[1:])
+        out = out.mean(dim=1)
+        return out
 
 
 class ContentEncoder(nn.Module):
@@ -251,7 +262,6 @@ class Decoder(nn.Module):
 
 class MLP(nn.Module):
     def __init__(self, in_dim, out_dim, dim, n_blk, norm, activ):
-
         super(MLP, self).__init__()
         self.model = []
         self.model += [LinearBlock(in_dim, dim, norm=norm, activation=activ)]
