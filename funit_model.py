@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 
 from networks import FewShotGen, GPPatchMcResDis
+from utils import patches2image
 
 
 def recon_criterion(predict, target):
@@ -23,6 +24,7 @@ class FUNITModel(nn.Module):
         self.gen_test = copy.deepcopy(self.gen)
         self.k = hp.get('k_class_images', 1)
         self.skip_real = hp.get('dis_skip_real', 1)
+        self.full_im_size = hp['new_size']
 
     def forward(self, co_data, cl_data, hp, mode, paired_data=None):
         xa = co_data[0].cuda()
@@ -33,19 +35,23 @@ class FUNITModel(nn.Module):
         if mode == 'gen_update':
             c_xa = self.gen.enc_content(xa)
             # TODO: reconstruction should use patches too if patches is enabled
-            s_xa = self.gen.enc_class_model(xa)  # reconstruction style
+            if hp.get('style_all_patches', False):
+                pa = co_data[2].cuda()
+                s_xa = self.gen.enc_class_model(pa)
+            else:
+                s_xa = self.gen.enc_class_model(xa)  # reconstruction style
             s_xb = self.gen.enc_class_model(xb)  # style
             xt = self.gen.decode(c_xa, s_xb)  # translation
             xr = self.gen.decode(c_xa, s_xa)  # reconstruction
             l_adv_t, gacc_t, xt_gan_feat = self.dis.calc_gen_loss(xt, lb[:, 0])
             l_adv_r, gacc_r, xr_gan_feat = self.dis.calc_gen_loss(xr, la)
-            _, xb_gan_feat = self.dis(xb[:, 0], lb[:, 0])
+            _, xb_gan_feat = self.dis(xb.view(-1, *xb.shape[2:]), lb.view(-1, *lb.shape[2:])) ##!!!!!!!#######
             _, xa_gan_feat = self.dis(xa, la)
             # comparing the discriminator feature map statistics
-            l_c_rec = recon_criterion(xr_gan_feat.mean(3).mean(2),
-                                      xa_gan_feat.mean(3).mean(2))
-            l_m_rec = recon_criterion(xt_gan_feat.mean(3).mean(2),
-                                      xb_gan_feat.mean(3).mean(2))
+            l_c_rec = recon_criterion(xr_gan_feat.mean([2, 3]),
+                                      xa_gan_feat.mean([2, 3]))
+            l_m_rec = recon_criterion(xt_gan_feat.mean([2, 3]),
+                                      xb_gan_feat.view(-1, k, *xb_gan_feat.shape[1:]).mean([1, 3, 4]))
             if torch.all(paired_data[0] == paired_data[0]):
                 xp = paired_data[0].cuda()
                 pair_loss = recon_criterion(xt, xp)
@@ -101,7 +107,14 @@ class FUNITModel(nn.Module):
         xt = self.gen_test.decode(c_xa, s_xb)
         xr = self.gen_test.decode(c_xa, s_xa)
         self.train()
-        return xa, xr_current, xt_current, xb, xr, xt
+        style_im = xb
+        if xb.size(1) > self.k:
+            patch_per_im = xb.size(1)//self.k
+            style_im = []
+            for i in range(xb.size(0)):
+                style_im.append(patches2image(xb[i, :patch_per_im], self.full_im_size, grid=True))
+            style_im = torch.stack(style_im).unsqueeze(1).cuda()
+        return xa, xr_current, xt_current, style_im, xr, xt
 
     def translate_k_shot(self, co_data, cl_data, k):
         self.eval()
@@ -125,8 +138,7 @@ class FUNITModel(nn.Module):
 
     def compute_k_style(self, style_batch, k):
         self.eval()
-        style_batch = style_batch.cuda()
-        s_xb_before = self.gen_test.enc_class_model(style_batch, k=k)
+        s_xb_before = self.gen_test.enc_class_model(style_batch)
         s_xb_after = s_xb_before.squeeze(-1).permute(1, 2, 0)
         s_xb_pool = torch.nn.functional.avg_pool1d(s_xb_after, k)
         s_xb = s_xb_pool.permute(2, 0, 1).unsqueeze(-1)

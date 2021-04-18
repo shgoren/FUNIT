@@ -151,7 +151,8 @@ class ContentStyleDataset(data.Dataset):
                  patch_size=None,
                  syle_all_patches=True,
                  k=1,
-                 return_path=False):
+                 return_path=False,
+                 overlap=0):
         """
 
         :param root: data folder.
@@ -178,6 +179,7 @@ class ContentStyleDataset(data.Dataset):
         self.syle_all_patches = syle_all_patches
         self.patch_size = patch_size
         self.return_path = return_path
+        self.overlap = overlap
 
         self.classes = sorted(list(set([path.split('/')[0] for path in self.im_list])))
         self.fake_classes_idx = [i for i, fc in enumerate(self.classes) if 'real' not in fc.lower()]
@@ -211,17 +213,19 @@ class ContentStyleDataset(data.Dataset):
         style_im = [self.transform(self.im_loader(os.path.join(self.root, im_p))) for im_p in style_im_p]
 
         if self.patch_size is not None:
-            cont_im = extract_patches(cont_im, self.patch_size)
-            style_im = [extract_patches(im, self.patch_size) for im in style_im]
+            cont_im = image2patches(cont_im, self.patch_size, overlap=self.overlap)
+            style_im = [image2patches(im, self.patch_size, overlap=self.overlap) for im in style_im]
             random_patch = np.random.choice(range(len(cont_im)))
-            cont_im = cont_im[random_patch]
             if self.syle_all_patches:
                 patch_cnt = len(style_im[0])
                 style_im = flatten(style_im)
                 style_id = flatten([[im_id] * patch_cnt for im_id in style_id])
                 style_lbl = flatten([[im_lbl] * patch_cnt for im_lbl in style_lbl])
+                cont_patches = torch.stack(cont_im)
             else:
                 style_im = [im_patch_list[random_patch] for im_patch_list in style_im]
+                cont_patches = [np.nan]
+            cont_im = cont_im[random_patch]
 
         if self.paired:
             res_im_p = self.imgs[style_lbl[0]][cont_id]
@@ -229,12 +233,12 @@ class ContentStyleDataset(data.Dataset):
             res_lbl = style_lbl
             res_im = self.transform(self.im_loader(os.path.join(self.root, res_im_p)))
             if self.patch_size is not None:
-                res_im = extract_patches(res_im, self.patch_size)[random_patch]
+                res_im = image2patches(res_im, self.patch_size, overlap=self.overlap)[random_patch]
             result = [res_im, res_lbl]
         else:
             result = [np.nan]
 
-        content = [cont_im, cont_lbl]
+        content = [cont_im, cont_lbl, cont_patches]
         style = [torch.stack(style_im, 0), torch.tensor(style_lbl)]
 
         if self.return_path:
@@ -254,8 +258,7 @@ class ContentStyleDataset(data.Dataset):
         im_lbl = self.class2label[im_cls]
         return im_name, im_lbl
 
-
-def extract_patches(im, patch_size, overlap=0):
+def image2patches(im, patch_size, overlap=0):
     if isinstance(im, Image.Image):
         im = np.array(im)
     patches = []
@@ -284,7 +287,8 @@ def test_dataset():
                                   patch_size=None,
                                   return_path=True,
                                   syle_all_patches=True,
-                                  k=3)
+                                  k=3,
+                                  overlap=0)
     c, s, r = dataset[0, 2008]
     print(c, s, r)
     plt.imshow(c[0], cmap='gray')

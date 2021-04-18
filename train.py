@@ -14,7 +14,7 @@ import shutil
 from tensorboardX import SummaryWriter
 
 from utils import get_config, get_train_loaders, make_result_folders
-from utils import write_loss, write_html, write_1images, Timer
+from utils import write_loss, write_html, write_1images, Timer, show
 from trainer import Trainer
 
 
@@ -88,7 +88,8 @@ iterations = trainer.resume(checkpoint_directory,
 
 while True:
     for it, (cont_data, style_data, pair_data) in enumerate(train_loader):
-        # returned data dimensions is (b*k, c, h, w)
+        # returned cont data dimensions is (b, c, h, w)
+        # returned style data dimensions is (b, k, c, h, w)
         with Timer("Elapsed time in update: %f"):
             if it % config.get('dis_skip', 1) == 0:
                 d_acc = trainer.dis_update(cont_data, style_data, config)

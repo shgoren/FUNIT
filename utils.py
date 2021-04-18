@@ -8,6 +8,7 @@ import yaml
 import time
 
 import torch
+from PIL.Image import Image
 from torch.utils.data import DataLoader, RandomSampler
 from torchvision import transforms
 import torchvision.utils as vutils
@@ -15,6 +16,8 @@ import math
 from torchvision.transforms import transforms
 import cv2
 import numpy as np
+import matplotlib.pyplot as plt
+
 
 irange = range
 import torch.nn.functional as F
@@ -32,7 +35,7 @@ def update_average(model_tgt, model_src, beta=0.999):
 
 
 def make_transform_list(new_size, hflip,
-        # crop, center_crop, crop_size
+                        # crop, center_crop, crop_size
                         ):
     transform_list = [transforms.ToTensor(),
                       transforms.Normalize((0.5,), (0.5,))
@@ -62,7 +65,8 @@ def loader_from_list(
         k=1,
         paired=False,
         hflip=True,
-        style_all_patches=True):
+        style_all_patches=True,
+        overlap=0):
     """
 
     :param root:
@@ -92,7 +96,8 @@ def loader_from_list(
                                   patch_size=patch_size,
                                   syle_all_patches=style_all_patches,
                                   paired=paired,
-                                  k=k)
+                                  k=k,
+                                  overlap=overlap)
     loader = DataLoader(dataset,
                         num_workers=num_workers,
                         batch_sampler=BatchContentStyleSampler(dataset, batch_size))
@@ -150,6 +155,7 @@ def get_train_loaders(conf):
         patch_size = None
     k = conf.get('k_class_images', 1)
     style_all_patches = conf.get("style_all_patches", True)
+    overlap = conf.get('overlap', 0)
 
     train_loader = loader_from_list(
         root=conf['data_folder_train'],
@@ -162,7 +168,8 @@ def get_train_loaders(conf):
         k=k,
         paired=conf['paired'],
         hflip=False,
-        style_all_patches=style_all_patches)
+        style_all_patches=style_all_patches,
+        overlap=overlap)
 
     test_loader = loader_from_list(
         root=conf['data_folder_test'],
@@ -175,10 +182,14 @@ def get_train_loaders(conf):
         k=k,
         paired=False,
         hflip=False,
-        style_all_patches=style_all_patches)
+        style_all_patches=style_all_patches,
+        overlap=overlap)
 
     return train_loader, test_loader
 
+def show(im):
+    plt.imshow(im, cmap='gray')
+    plt.show()
 
 def get_config(config):
     with open(config, 'r') as stream:
@@ -371,6 +382,58 @@ def write_loss(iterations, trainer, train_writer):
         train_writer.add_scalar(m, getattr(trainer, m), iterations + 1)
 
 
+def patches2image(patches, imsize, overlap=0, grid=False):
+    if isinstance(imsize, int):
+        imsize = (imsize, imsize)
+    _, psize, _ = patches[0].shape
+    h, w = imsize
+    new_im = torch.zeros((h, w)).cuda()
+    patch_cnt = 0
+    for i in range(0, h, psize - overlap):
+        for j in range(0, w, psize - overlap):
+            if i + psize > h:
+                overlap_x = overlap + i+psize-h
+                i = h-psize
+            else:
+                overlap_x = overlap
+
+            if j+psize > w:
+                overlap_y = overlap + j+psize-w
+                j = w-psize
+            else:
+                overlap_y = overlap
+
+            patch = patches[patch_cnt][0].cuda()
+            if grid:
+                patch[0] = 0
+                patch[-1] = 0
+                patch[:, 0] = 0
+                patch[:, -1] = 0
+            if i == 0:
+                new_im[:overlap_x, j+overlap_y: j + psize] = patch[:overlap_x, overlap_y:]
+            else:
+                new_im[i:i+overlap_x, j: j + psize] = (patch[:overlap_x] + new_im[i:i+overlap_x, j: j + psize]) / 2
+            if j == 0:
+                new_im[i+overlap_x: i + psize, :overlap_y] = patch[overlap_x:, :overlap_y]
+            else:
+                new_im[i: i + psize, j:j+overlap_y] = (patch[:, :overlap_y] + new_im[i: i + psize, j:j+overlap_y]) / 2
+            new_im[i+overlap_x: i+psize, j+overlap_y: j+psize] = patch[overlap_x:, overlap_y:]
+            patch_cnt += 1
+    assert patch_cnt == len(patches)
+    return new_im.unsqueeze(0)
+
+def test_patching():
+    config = get_config('configs/depth_real2cg_gray19.yaml')
+    config['batch_size'] = 1
+    config['num_workers'] = 0
+    config['crop_size'] = 64
+    config['overlap'] = 15
+    train_loader, _ = get_train_loaders(config)
+    for cont_data, style_data, pair_data in train_loader:
+        patches2image(style_data[0][0], 224, 15)
+        break
+
+
 class Timer:
     def __init__(self, msg):
         self.msg = msg
@@ -381,6 +444,7 @@ class Timer:
 
     def __exit__(self, exc_type, exc_value, exc_tb):
         print(self.msg % (time.time() - self.start_time))
+
 
 def test_loader_from_list():
     loader = loader_from_list("./datasets/apple",
